@@ -97,7 +97,7 @@ Full setup for a new project. Requires the project's repo path (local) and GitHu
    ```
    Create log directory: `mkdir -p ~/.symphony/logs`
 
-4. **Report** the setup to Mell — don't start it automatically.
+4. **Report** the setup to Mell.
 
 ### `symphony rebuild`
 
@@ -109,7 +109,6 @@ Then restart any running instances (stop + start each).
 
 ## Important notes
 
-- **Never start Symphony without Mell's go-ahead** on `setup`.
 - **KeepAlive is false by default.** Set to `<true/>` in the plist and reload if Mell wants auto-restart for a project.
 - **Logs** at `~/.symphony/logs/<project>.{stdout,stderr}.log`.
 - **One binary, many configs.** Rebuild once, restart instances to pick up changes.
