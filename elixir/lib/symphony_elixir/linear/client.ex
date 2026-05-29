@@ -132,17 +132,14 @@ defmodule SymphonyElixir.Linear.Client do
     tracker = Config.settings!().tracker
     project_slug = tracker.project_slug
 
-    cond do
-      is_nil(tracker.api_key) ->
-        {:error, :missing_linear_api_token}
-
-      is_nil(project_slug) ->
-        {:error, :missing_linear_project_slug}
-
-      true ->
-        with {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_by_states(project_slug, tracker.active_states, assignee_filter)
-        end
+    # Auth is OAuth (Bearer) — see graphql_headers/0. `tracker.api_key` is
+    # vestigial from the pre-OAuth design, so dispatch must not gate on it.
+    if is_nil(project_slug) do
+      {:error, :missing_linear_project_slug}
+    else
+      with {:ok, assignee_filter} <- routing_assignee_filter() do
+        do_fetch_by_states(project_slug, tracker.active_states, assignee_filter)
+      end
     end
   end
 
@@ -156,15 +153,11 @@ defmodule SymphonyElixir.Linear.Client do
       tracker = Config.settings!().tracker
       project_slug = tracker.project_slug
 
-      cond do
-        is_nil(tracker.api_key) ->
-          {:error, :missing_linear_api_token}
-
-        is_nil(project_slug) ->
-          {:error, :missing_linear_project_slug}
-
-        true ->
-          do_fetch_by_states(project_slug, normalized_states, nil)
+      # Auth is OAuth (Bearer); `tracker.api_key` is vestigial — don't gate on it.
+      if is_nil(project_slug) do
+        {:error, :missing_linear_project_slug}
+      else
+        do_fetch_by_states(project_slug, normalized_states, nil)
       end
     end
   end
