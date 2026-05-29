@@ -1527,18 +1527,24 @@ defmodule SymphonyElixir.Orchestrator do
       case Tracker.fetch_issues_needing_rework(agent_user_id) do
         {:ok, issues} when issues != [] ->
           Enum.reduce(issues, state, fn issue, acc ->
-            if MapSet.member?(acc.claimed, issue.id) or MapSet.member?(acc.completed, issue.id) do
+            # Only skip issues currently being dispatched. Do NOT skip issues in
+            # `completed`: rework is precisely the act of re-doing work the agent
+            # already finished, so a completed issue with new reviewer feedback
+            # must be allowed back into the loop. Re-dispatch loops are prevented
+            # by comment recency — the agent comments while working, so it becomes
+            # the latest commenter and won't re-trigger until a human replies again.
+            if MapSet.member?(acc.claimed, issue.id) do
               acc
             else
               case Tracker.update_issue_state(issue.id, "Rework") do
                 :ok ->
                   Logger.info("Auto-rework: moved #{issue.identifier} to Rework (reviewer comment detected)")
+                  %{acc | completed: MapSet.delete(acc.completed, issue.id)}
 
                 {:error, reason} ->
                   Logger.warning("Auto-rework: failed to move #{issue.identifier}: #{inspect(reason)}")
+                  acc
               end
-
-              acc
             end
           end)
 
