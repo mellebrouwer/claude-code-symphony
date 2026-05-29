@@ -14,7 +14,7 @@ tracker:
 claude_code:
   command: claude
   turn_timeout_ms: 3600000
-  stall_timeout_ms: 300000
+  stall_timeout_ms: 900000
 agent:
   max_concurrent_agents: 3
   max_turns: 10

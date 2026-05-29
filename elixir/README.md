@@ -101,7 +101,9 @@ Notes:
 - `claude_code.command` specifies the Claude Code CLI binary (default: `claude`).
 - `claude_code.turn_timeout_ms` is the maximum time for a single CC turn (default: 1 hour).
 - `claude_code.stall_timeout_ms` is how long the orchestrator waits without events before
-  considering an agent stalled and restarting it (default: 5 minutes).
+  considering an agent stalled and restarting it (default: 15 minutes). The adapter emits
+  heartbeat events from non-JSON CC output (stderr, verbose logs) to keep the stall timer
+  fresh while CC is actively running.
 - `agent.max_turns` caps how many back-to-back Claude Code turns Symphony will run in a single
   agent invocation when a turn completes normally but the issue is still in an active state.
   Default: `20`.

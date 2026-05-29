@@ -157,7 +157,7 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:command, :string, default: "claude")
       field(:turn_timeout_ms, :integer, default: 3_600_000)
-      field(:stall_timeout_ms, :integer, default: 300_000)
+      field(:stall_timeout_ms, :integer, default: 900_000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
