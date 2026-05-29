@@ -5,7 +5,6 @@ tracker:
   project_slug: f9f9d4341be2
   active_states:
     - Todo
-    - In Progress
     - Rework
     - Merging
   terminal_states:
@@ -88,16 +87,15 @@ Follow this state machine:
 
 2. Read relevant files before making changes.
 
-3. Implement the task:
+3. Do the work. This might be code changes, an audit, a review, documentation, or investigation.
+
+4. If there are code changes:
    - Write clean, tested code.
    - Run existing tests if they exist.
    - Commit with a clear message.
+   - Create a branch, push, and open a PR with a summary and test plan.
 
-4. Push and create a PR:
-   - Create a branch, push changes.
-   - Create a PR with a summary and test plan.
-
-5. Add a comment on the Linear issue summarizing what was done and linking the PR.
+5. Add a comment on the Linear issue summarizing what was done. Link the PR if one was created.
 
 6. Move the issue to "In Review":
    ```
