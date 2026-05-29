@@ -5,6 +5,7 @@ tracker:
   project_slug: f9f9d4341be2
   active_states:
     - Todo
+    - In Progress
     - Rework
     - Merging
   terminal_states:
