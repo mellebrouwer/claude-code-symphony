@@ -47,6 +47,15 @@ defmodule SymphonyElixir.Tracker.Memory do
     :ok
   end
 
+  @spec fetch_issues_needing_rework(String.t() | nil) :: {:ok, [term()]} | {:error, term()}
+  def fetch_issues_needing_rework(_agent_user_id), do: {:ok, []}
+
+  @spec archive_issue(String.t()) :: :ok | {:error, term()}
+  def archive_issue(issue_id) do
+    send_event({:memory_tracker_archive, issue_id})
+    :ok
+  end
+
   defp configured_issues do
     Application.get_env(:symphony_elixir, :memory_tracker_issues, [])
   end

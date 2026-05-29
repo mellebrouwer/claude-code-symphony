@@ -104,9 +104,11 @@ Notes:
 - `claude_code.command` specifies the Claude Code CLI binary (default: `claude`).
 - `claude_code.turn_timeout_ms` is the maximum time for a single CC turn (default: 1 hour).
 - `claude_code.stall_timeout_ms` is how long the orchestrator waits without events before
-  considering an agent stalled and restarting it (default: 15 minutes). The adapter emits
-  heartbeat events from non-JSON CC output (stderr, verbose logs) to keep the stall timer
-  fresh while CC is actively running.
+  considering an agent stalled and restarting it (default: 15 minutes). All JSON events from
+  CC's stream-json output reset the stall timer.
+- `tracker.archive_done_after_hours` controls auto-archiving of terminal-state issues. Issues in
+  Done, Canceled, etc. for longer than this many hours are archived automatically (checked hourly).
+  Set to `0` to disable. Default: `24`. Useful for Linear's free plan which has a 250-issue limit.
 - `agent.max_turns` caps how many back-to-back Claude Code turns Symphony will run in a single
   agent invocation when a turn completes normally but the issue is still in an active state.
   Default: `20`.
@@ -114,7 +116,12 @@ Notes:
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
   `git clone ... .` there.
-- `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
+- **OAuth authentication:** Place a `.linear_oauth.json` file at `~/.symphony/` with
+  `client_id` and `client_secret` from a Linear OAuth app (created with `actor=app`). Symphony
+  exchanges these for a token on startup and refreshes hourly when the token nears expiry. Agent
+  comments show as the app identity, not the personal user. This also enables auto-rework
+  detection: when a human comments on an In Review issue, Symphony automatically moves it to
+  Rework and dispatches an agent.
 - For path values, `~` is expanded to the home directory.
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the

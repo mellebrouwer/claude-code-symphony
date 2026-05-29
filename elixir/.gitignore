@@ -43,6 +43,7 @@ erl_crash.dump
 .env.*
 .secrets
 .credentials
+.linear_oauth.json
 status.txt
 .codex/original-user-prompt.txt
 

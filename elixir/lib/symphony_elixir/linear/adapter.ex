@@ -23,6 +23,14 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  @archive_issue_mutation """
+  mutation SymphonyArchiveIssue($issueId: String!) {
+    issueArchive(id: $issueId) {
+      success
+    }
+  }
+  """
+
   @state_lookup_query """
   query SymphonyResolveStateId($issueId: String!, $stateName: String!) {
     issue(id: $issueId) {
@@ -70,6 +78,22 @@ defmodule SymphonyElixir.Linear.Adapter do
       false -> {:error, :issue_update_failed}
       {:error, reason} -> {:error, reason}
       _ -> {:error, :issue_update_failed}
+    end
+  end
+
+  @spec fetch_issues_needing_rework(String.t() | nil) :: {:ok, [term()]} | {:error, term()}
+  def fetch_issues_needing_rework(agent_user_id),
+    do: client_module().fetch_issues_needing_rework(agent_user_id)
+
+  @spec archive_issue(String.t()) :: :ok | {:error, term()}
+  def archive_issue(issue_id) when is_binary(issue_id) do
+    with {:ok, response} <- client_module().graphql(@archive_issue_mutation, %{issueId: issue_id}),
+         true <- get_in(response, ["data", "issueArchive", "success"]) == true do
+      :ok
+    else
+      false -> {:error, :issue_archive_failed}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :issue_archive_failed}
     end
   end
 

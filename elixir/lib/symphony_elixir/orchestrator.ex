@@ -8,12 +8,13 @@ defmodule SymphonyElixir.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
-  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Linear.{Issue, OAuthTokenManager}
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @archive_check_interval_ms 3_600_000
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -65,8 +66,10 @@ defmodule SymphonyElixir.Orchestrator do
       codex_rate_limits: nil
     }
 
+    OAuthTokenManager.exchange()
     run_terminal_workspace_cleanup()
     state = schedule_tick(state, 0)
+    schedule_archive_check()
 
     {:ok, state}
   end
@@ -192,6 +195,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:retry_issue, _issue_id}, state), do: {:noreply, state}
 
+  def handle_info(:archive_done_issues, state) do
+    OAuthTokenManager.maybe_refresh()
+    archive_stale_done_issues()
+    schedule_archive_check()
+    {:noreply, state}
+  end
+
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
     {:noreply, state}
@@ -248,6 +258,7 @@ defmodule SymphonyElixir.Orchestrator do
       state
       |> reconcile_running_issues()
       |> reconcile_blocked_issues()
+      |> promote_review_feedback_to_rework()
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
@@ -1507,6 +1518,77 @@ defmodule SymphonyElixir.Orchestrator do
       message: update[:payload] || update[:raw],
       timestamp: update[:timestamp]
     }
+  end
+
+  defp promote_review_feedback_to_rework(%State{} = state) do
+    agent_user_id = OAuthTokenManager.app_user_id()
+
+    if agent_user_id do
+      case Tracker.fetch_issues_needing_rework(agent_user_id) do
+        {:ok, issues} when issues != [] ->
+          Enum.reduce(issues, state, fn issue, acc ->
+            if MapSet.member?(acc.claimed, issue.id) or MapSet.member?(acc.completed, issue.id) do
+              acc
+            else
+              case Tracker.update_issue_state(issue.id, "Rework") do
+                :ok ->
+                  Logger.info("Auto-rework: moved #{issue.identifier} to Rework (reviewer comment detected)")
+
+                {:error, reason} ->
+                  Logger.warning("Auto-rework: failed to move #{issue.identifier}: #{inspect(reason)}")
+              end
+
+              acc
+            end
+          end)
+
+        {:ok, []} ->
+          state
+
+        {:error, reason} ->
+          Logger.debug("Auto-rework check failed: #{inspect(reason)}")
+          state
+      end
+    else
+      state
+    end
+  end
+
+  defp schedule_archive_check do
+    Process.send_after(self(), :archive_done_issues, @archive_check_interval_ms)
+  end
+
+  defp archive_stale_done_issues do
+    archive_after_hours = Config.settings!().tracker.archive_done_after_hours
+
+    if archive_after_hours > 0 do
+      cutoff = DateTime.add(DateTime.utc_now(), -archive_after_hours, :hour)
+
+      case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
+        {:ok, issues} ->
+          stale =
+            Enum.filter(issues, fn issue ->
+              issue.updated_at != nil and DateTime.compare(issue.updated_at, cutoff) == :lt
+            end)
+
+          if stale != [] do
+            Logger.info("Archiving #{length(stale)} stale terminal issue(s)")
+          end
+
+          Enum.each(stale, fn issue ->
+            case Tracker.archive_issue(issue.id) do
+              :ok ->
+                Logger.info("Archived #{issue.identifier} (done since #{issue.updated_at})")
+
+              {:error, reason} ->
+                Logger.warning("Failed to archive #{issue.identifier}: #{inspect(reason)}")
+            end
+          end)
+
+        {:error, reason} ->
+          Logger.warning("Failed to fetch Done issues for archiving: #{inspect(reason)}")
+      end
+    end
   end
 
   defp schedule_tick(%State{} = state, delay_ms) when is_integer(delay_ms) and delay_ms >= 0 do

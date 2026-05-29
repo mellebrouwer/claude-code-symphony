@@ -6,6 +6,7 @@ defmodule SymphonyElixir.ClaudeCode.Adapter do
 
   require Logger
   alias SymphonyElixir.{Config, PathSafety}
+  alias SymphonyElixir.Linear.OAuthTokenManager
 
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
@@ -76,7 +77,9 @@ defmodule SymphonyElixir.ClaudeCode.Adapter do
           }, turn_metadata)
 
           try do
-            case stream_turn(port, on_message, agent_pid, turn_metadata) do
+            stream_result = stream_turn(port, on_message, agent_pid, turn_metadata)
+
+            case stream_result do
               {:ok, _result} ->
                 final_session_id = Agent.get(agent_pid, & &1) || session_id || "unknown"
 
@@ -143,13 +146,14 @@ defmodule SymphonyElixir.ClaudeCode.Adapter do
     if is_nil(executable) do
       {:error, :bash_not_found}
     else
-      linear_api_key = Config.settings!().tracker.api_key
-
       env_vars =
-        if is_binary(linear_api_key) do
-          [{~c"LINEAR_API_KEY", String.to_charlist(linear_api_key)}]
-        else
-          []
+        case OAuthTokenManager.current_token() do
+          nil ->
+            Logger.warning("No OAuth token available for agent — Linear API calls will fail")
+            []
+
+          token ->
+            [{~c"LINEAR_API_KEY", String.to_charlist("Bearer #{token}")}]
         end
 
       port =

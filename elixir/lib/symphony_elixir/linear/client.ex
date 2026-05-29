@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Linear.Client do
 
   require Logger
   alias SymphonyElixir.{Config, Linear.Issue}
+  alias SymphonyElixir.Linear.OAuthTokenManager
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
@@ -95,6 +96,29 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
+  @review_feedback_query """
+  query SymphonyLinearReviewFeedback($projectSlug: String!, $stateNames: [String!]!, $first: Int!) {
+    issues(filter: {project: {slugId: {eq: $projectSlug}}, state: {name: {in: $stateNames}}}, first: $first) {
+      nodes {
+        id
+        identifier
+        title
+        state {
+          name
+        }
+        comments(first: 1) {
+          nodes {
+            user {
+              id
+              name
+            }
+          }
+        }
+      }
+    }
+  }
+  """
+
   @viewer_query """
   query SymphonyLinearViewer {
     viewer {
@@ -159,6 +183,53 @@ defmodule SymphonyElixir.Linear.Client do
         end
     end
   end
+
+  @spec fetch_issues_needing_rework(String.t()) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_needing_rework(agent_user_id) when is_binary(agent_user_id) do
+    tracker = Config.settings!().tracker
+    project_slug = tracker.project_slug
+
+    cond do
+      is_nil(project_slug) ->
+        {:error, :missing_linear_project_slug}
+
+      true ->
+        case graphql(@review_feedback_query, %{
+               projectSlug: project_slug,
+               stateNames: ["In Review"],
+               first: @issue_page_size
+             }) do
+          {:ok, %{"data" => %{"issues" => %{"nodes" => nodes}}}} when is_list(nodes) ->
+            needing_rework =
+              nodes
+              |> Enum.filter(fn node ->
+                latest_comment_author = get_in(node, ["comments", "nodes", Access.at(0), "user", "id"])
+                latest_comment_author != nil and latest_comment_author != agent_user_id
+              end)
+              |> Enum.map(fn node ->
+                %Issue{
+                  id: node["id"],
+                  identifier: node["identifier"],
+                  title: node["title"],
+                  state: get_in(node, ["state", "name"])
+                }
+              end)
+
+            {:ok, needing_rework}
+
+          {:ok, %{"errors" => errors}} ->
+            {:error, {:linear_graphql_errors, errors}}
+
+          {:ok, _} ->
+            {:ok, []}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+    end
+  end
+
+  def fetch_issues_needing_rework(nil), do: {:ok, []}
 
   @spec graphql(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def graphql(query, variables \\ %{}, opts \\ [])
@@ -381,14 +452,14 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp graphql_headers do
-    case Config.settings!().tracker.api_key do
+    case OAuthTokenManager.current_token() do
       nil ->
-        {:error, :missing_linear_api_token}
+        {:error, :missing_oauth_token}
 
       token ->
         {:ok,
          [
-           {"Authorization", token},
+           {"Authorization", "Bearer #{token}"},
            {"Content-Type", "application/json"}
          ]}
     end

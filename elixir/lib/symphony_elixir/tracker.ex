@@ -10,6 +10,8 @@ defmodule SymphonyElixir.Tracker do
   @callback fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
   @callback create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   @callback update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
+  @callback fetch_issues_needing_rework(String.t() | nil) :: {:ok, [term()]} | {:error, term()}
+  @callback archive_issue(String.t()) :: :ok | {:error, term()}
 
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues do
@@ -34,6 +36,16 @@ defmodule SymphonyElixir.Tracker do
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name) do
     adapter().update_issue_state(issue_id, state_name)
+  end
+
+  @spec fetch_issues_needing_rework(String.t() | nil) :: {:ok, [term()]} | {:error, term()}
+  def fetch_issues_needing_rework(agent_user_id) do
+    adapter().fetch_issues_needing_rework(agent_user_id)
+  end
+
+  @spec archive_issue(String.t()) :: :ok | {:error, term()}
+  def archive_issue(issue_id) do
+    adapter().archive_issue(issue_id)
   end
 
   @spec adapter() :: module()

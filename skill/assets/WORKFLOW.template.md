@@ -2,7 +2,7 @@
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
-  project_slug: f9f9d4341be2
+  project_slug: "{{PROJECT_SLUG}}"
   active_states:
     - Todo
     - In Progress
@@ -22,11 +22,11 @@ agent:
   max_concurrent_agents: 3
   max_turns: 10
 workspace:
-  root: /tmp/symphony_workspaces
+  root: /tmp/symphony_workspaces/{{PROJECT_NAME}}
 hooks:
-  after_create: "git clone /Users/mellbrouwer/Documents/Coding/symphony-cc . 2>/dev/null || true && git remote set-url origin https://github.com/mellebrouwer/symphony-cc.git"
+  after_create: "git clone {{REPO_PATH}} . 2>/dev/null || true && git remote set-url origin {{GITHUB_URL}}"
 polling:
-  interval_ms: 10000
+  interval_ms: 30000
 ---
 
 You are an unattended coding agent working on Linear ticket `{{ issue.identifier }}`.
