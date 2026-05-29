@@ -98,6 +98,9 @@ Body: {{ issue.description }}
 Notes:
 
 - If a value is missing, defaults are used.
+- The workflow uses these Linear states: **Todo** → **In Progress** → **In Review** (human) →
+  **Merging** → **Done**, with a **Rework** loop for reviewer feedback. Configure `active_states`
+  to include all agent-driven states (not In Review — that's human-driven).
 - `claude_code.command` specifies the Claude Code CLI binary (default: `claude`).
 - `claude_code.turn_timeout_ms` is the maximum time for a single CC turn (default: 1 hour).
 - `claude_code.stall_timeout_ms` is how long the orchestrator waits without events before

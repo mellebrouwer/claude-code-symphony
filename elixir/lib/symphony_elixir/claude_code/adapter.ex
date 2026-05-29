@@ -232,34 +232,8 @@ defmodule SymphonyElixir.ClaudeCode.Adapter do
         handle_init_event(payload, on_message, agent_pid, metadata)
         receive_loop(port, on_message, agent_pid, metadata, timeout_ms, "")
 
-      {:ok, %{"type" => "assistant"} = payload} ->
-        usage_metadata = maybe_extract_usage(payload, metadata)
-
-        emit_message(on_message, :notification, %{
-          payload: payload,
-          raw: line
-        }, usage_metadata)
-
-        receive_loop(port, on_message, agent_pid, metadata, timeout_ms, "")
-
-      {:ok, %{"type" => "tool_use"} = payload} ->
-        emit_message(on_message, :notification, %{
-          payload: payload,
-          raw: line
-        }, metadata)
-
-        receive_loop(port, on_message, agent_pid, metadata, timeout_ms, "")
-
-      {:ok, %{"type" => "tool_result"} = payload} ->
-        emit_message(on_message, :notification, %{
-          payload: payload,
-          raw: line
-        }, metadata)
-
-        receive_loop(port, on_message, agent_pid, metadata, timeout_ms, "")
-
-      {:ok, %{"type" => "result"} = payload} ->
-        handle_result_event(payload, line, on_message, agent_pid, metadata)
+      {:ok, %{"type" => type} = payload} ->
+        handle_typed_event(type, payload, line, on_message, agent_pid, metadata)
         receive_loop(port, on_message, agent_pid, metadata, timeout_ms, "")
 
       {:ok, payload} ->
@@ -274,6 +248,27 @@ defmodule SymphonyElixir.ClaudeCode.Adapter do
         log_non_json_line(line)
         receive_loop(port, on_message, agent_pid, metadata, timeout_ms, "")
     end
+  end
+
+  defp handle_typed_event("assistant", payload, line, on_message, _agent_pid, metadata) do
+    usage_metadata = maybe_extract_usage(payload, metadata)
+    emit_message(on_message, :notification, %{payload: payload, raw: line}, usage_metadata)
+  end
+
+  defp handle_typed_event("tool_use", payload, line, on_message, _agent_pid, metadata) do
+    emit_message(on_message, :notification, %{payload: payload, raw: line}, metadata)
+  end
+
+  defp handle_typed_event("tool_result", payload, line, on_message, _agent_pid, metadata) do
+    emit_message(on_message, :notification, %{payload: payload, raw: line}, metadata)
+  end
+
+  defp handle_typed_event("result", payload, line, on_message, agent_pid, metadata) do
+    handle_result_event(payload, line, on_message, agent_pid, metadata)
+  end
+
+  defp handle_typed_event(_type, payload, line, on_message, _agent_pid, metadata) do
+    emit_message(on_message, :other_message, %{payload: payload, raw: line}, metadata)
   end
 
   defp handle_init_event(payload, on_message, agent_pid, metadata) do
