@@ -15,6 +15,7 @@ Manage Symphony CC instances across projects. Each project gets its own Linear p
 - **OAuth credentials:** `~/.symphony/.linear_oauth.json` (shared across all instances)
 - **Linear team ID:** `89e76573-6ebc-4fcd-90c9-0d4d2693bddd`
 - **Launchd plists:** `~/Library/LaunchAgents/com.symphony-cc.<project>.plist`
+- **Health watchdog:** `~/Library/LaunchAgents/com.symphony-cc.watchdog.plist` (one global timer, every 15 min — see below)
 - **WORKFLOW.md template:** `$SKILL_DIR/assets/WORKFLOW.template.md`
 - **Scripts:** `$SKILL_DIR/scripts/`
 
@@ -106,6 +107,38 @@ cd ~/Documents/Coding/symphony-cc/elixir && mix build && cp bin/symphony ~/.loca
 ```
 
 Then restart any running instances (stop + start each).
+
+## Health watchdog
+
+Sets each Linear project's **health** badge (`On track` / `Off track`) from launchd
+liveness, so you can see at a glance whether a project's Symphony is actually running.
+
+A process can't announce its own death, so health is owned by an **external** watchdog
+(`scripts/watchdog.py`), woken every 15 minutes by `com.symphony-cc.watchdog.plist` —
+*not* by Symphony itself. Each run:
+
+1. enumerates `com.symphony-cc.*.plist` (skipping itself),
+2. derives the Linear project live with **no stored map** — the plist's
+   `ProgramArguments` points at the project's `WORKFLOW.md`, which carries `project_slug`,
+3. checks launchd liveness for that label → `onTrack` if running, else `offTrack`,
+4. posts a Linear project update **only when health changed** (keeps the feed quiet).
+
+New projects are covered automatically — there is **one** global watchdog, not one per
+project. Install it once from the asset:
+
+```bash
+cp $SKILL_DIR/assets/com.symphony-cc.watchdog.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.symphony-cc.watchdog.plist
+```
+
+Run it manually any time (e.g. to force a check):
+
+```bash
+python3 $SKILL_DIR/scripts/watchdog.py
+```
+
+Logs at `~/.symphony/logs/watchdog.{stdout,stderr}.log`. Tune the cadence via
+`StartInterval` in the plist.
 
 ## Important notes
 
