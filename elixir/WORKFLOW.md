@@ -72,12 +72,18 @@ Follow this state machine:
 
 ### Todo / In Progress
 
-1. Move the issue to "In Progress" if it is in "Todo":
+1. Move the issue to "In Progress" if it is in "Todo" and post a comment that you're starting:
    ```
    curl -s -X POST https://api.linear.app/graphql \
      -H "Content-Type: application/json" \
      -H "Authorization: $LINEAR_API_KEY" \
      -d '{"query": "mutation { issueUpdate(id: \"{{ issue.id }}\", input: { stateId: \"296298ef-3aa4-415e-b867-5e2cd5772e53\" }) { success } }"}'
+   ```
+   ```
+   curl -s -X POST https://api.linear.app/graphql \
+     -H "Content-Type: application/json" \
+     -H "Authorization: $LINEAR_API_KEY" \
+     -d '{"query": "mutation { commentCreate(input: { issueId: \"{{ issue.id }}\", body: \"Picked up by agent. Starting work.\" }) { success } }"}'
    ```
 
 2. Read relevant files before making changes.
@@ -103,11 +109,24 @@ Follow this state machine:
 
 ### Rework
 
-1. Find the PR attached to this issue.
-2. Read all reviewer comments (inline and top-level).
-3. Address every comment: either fix the code or reply with a justified explanation.
-4. Push updates, verify tests pass.
-5. Move the issue back to "In Review".
+1. Move the issue to "In Progress" and post a comment that you're addressing feedback:
+   ```
+   curl -s -X POST https://api.linear.app/graphql \
+     -H "Content-Type: application/json" \
+     -H "Authorization: $LINEAR_API_KEY" \
+     -d '{"query": "mutation { issueUpdate(id: \"{{ issue.id }}\", input: { stateId: \"296298ef-3aa4-415e-b867-5e2cd5772e53\" }) { success } }"}'
+   ```
+   ```
+   curl -s -X POST https://api.linear.app/graphql \
+     -H "Content-Type: application/json" \
+     -H "Authorization: $LINEAR_API_KEY" \
+     -d '{"query": "mutation { commentCreate(input: { issueId: \"{{ issue.id }}\", body: \"Addressing reviewer feedback.\" }) { success } }"}'
+   ```
+2. Find the PR attached to this issue.
+3. Read all reviewer comments (inline and top-level).
+4. Address every comment: either fix the code or reply with a justified explanation.
+5. Push updates, verify tests pass.
+6. Move the issue back to "In Review".
 
 ### Merging
 
