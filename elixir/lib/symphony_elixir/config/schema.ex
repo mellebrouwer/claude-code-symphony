@@ -157,18 +157,47 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
+      # `command` is the claude binary (passed to cc-appserver as --claude-bin).
       field(:command, :string, default: "claude")
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:stall_timeout_ms, :integer, default: 900_000)
+
+      # cc-appserver engine: a persistent interactive Claude Code session driven
+      # over stdio JSON-RPC (replaces the old `claude -p --resume` per-turn spawn).
+      field(:app_server_path, :string, default: "~/Documents/Coding/cc-appserver/cc_appserver.py")
+      field(:python_bin, :string, default: "python3")
+      field(:model, :string)
+      field(:permission_mode, :string, default: "bypassPermissions")
+      field(:startup_timeout_ms, :integer, default: 90_000)
+      # Each agent gets its own tmux server, socket = "<prefix>_<random>", so
+      # concurrent agents (and multiple Symphony instances) never collide and
+      # teardown only ever kills that one agent's sessions. Set a per-project
+      # prefix to keep `tmux -L` listings legible.
+      field(:tmux_socket_prefix, :string, default: "symphony")
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:command, :turn_timeout_ms, :stall_timeout_ms], empty_values: [])
-      |> validate_required([:command])
+      |> cast(
+        attrs,
+        [
+          :command,
+          :turn_timeout_ms,
+          :stall_timeout_ms,
+          :app_server_path,
+          :python_bin,
+          :model,
+          :permission_mode,
+          :startup_timeout_ms,
+          :tmux_socket_prefix
+        ],
+        empty_values: []
+      )
+      |> validate_required([:command, :app_server_path, :python_bin, :tmux_socket_prefix])
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:startup_timeout_ms, greater_than: 0)
     end
   end
 
@@ -414,7 +443,6 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp normalize_secret_value(_value), do: nil
-
 
   defp format_errors(changeset) do
     changeset

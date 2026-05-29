@@ -1,18 +1,43 @@
 defmodule SymphonyElixir.ClaudeCode.Adapter do
   @moduledoc """
-  Agent adapter that spawns Claude Code in headless mode (`claude -p --output-format stream-json`).
-  Implements the same 3-function API as Codex.AppServer so AgentRunner can swap in without changes.
+  Agent adapter that drives Claude Code through **cc-appserver**: one long-lived
+  `cc_appserver.py --stdio --no-tcp` child per agent that keeps an *interactive*
+  Claude Code session alive in tmux, driven over newline-delimited JSON-RPC on
+  the child's stdin/stdout (a BEAM `Port`).
+
+  This replaces the previous `claude -p --output-format stream-json --resume`
+  engine — a cold headless process spawned per turn. Now `start_session` opens a
+  persistent conversation, each `run_turn` is a `sendUserMessage` on the same
+  `conversationId` (context/caches retained between turns, no `--resume`), and
+  `stop_session` closes the conversation and the child.
+
+  The **output contract to the orchestrator is unchanged**: it implements the
+  same `run/4`, `start_session/2`, `run_turn/4`, `stop_session/1` API and emits
+  the same `on_message` events (`:session_started`, `:notification`,
+  `:turn_completed`, `:turn_ended_with_error`, `:other_message`), each carrying
+  `:event` + `:timestamp`. Only the input mechanism changed.
   """
 
   require Logger
+  alias SymphonyElixir.ClaudeCode.AppServerClient
   alias SymphonyElixir.{Config, PathSafety}
   alias SymphonyElixir.Linear.OAuthTokenManager
 
-  @port_line_bytes 1_048_576
-  @max_stream_log_bytes 1_000
+  # sendUserMessage just acks (waitForCompletion:false) — the turn itself is
+  # tracked via notifications, so this only needs to cover the round-trip.
+  @ack_timeout_ms 30_000
+  @close_timeout_ms 10_000
+  @interrupt_timeout_ms 10_000
+  # Grace beyond the turn timeout: cc-appserver enforces `timeoutMs` and emits a
+  # `turnComplete{timedOut:true}`; our own receive deadline is only a backstop in
+  # case that notification never arrives.
+  @turn_grace_ms 60_000
 
   @type session :: %{
-          session_id_agent: pid(),
+          client: pid(),
+          conversation_id: String.t(),
+          session_id: String.t(),
+          tmux_socket: String.t(),
           workspace: Path.t(),
           worker_host: String.t() | nil,
           metadata: map()
@@ -32,290 +57,367 @@ defmodule SymphonyElixir.ClaudeCode.Adapter do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
+    cc = Config.settings!().claude_code
 
-    with {:ok, expanded_workspace} <- validate_workspace(workspace, worker_host) do
-      {:ok, agent_pid} = Agent.start_link(fn -> nil end)
+    with {:ok, expanded_workspace} <- validate_workspace(workspace, worker_host),
+         {:ok, script} <- resolve_app_server_path(cc.app_server_path),
+         {:ok, python} <- resolve_python(cc.python_bin) do
+      socket = build_tmux_socket(cc.tmux_socket_prefix)
 
-      {:ok,
-       %{
-         session_id_agent: agent_pid,
-         workspace: expanded_workspace,
-         worker_host: worker_host,
-         metadata: %{}
-       }}
+      case AppServerClient.start_link(
+             python: python,
+             script: script,
+             tmux_socket: socket,
+             workspace: expanded_workspace,
+             claude_bin: cc.command,
+             permission_mode: cc.permission_mode,
+             env: agent_env()
+           ) do
+        {:ok, client} ->
+          AppServerClient.subscribe(client, self())
+          finish_start_session(client, socket, expanded_workspace, worker_host, cc)
+
+        {:error, reason} ->
+          {:error, {:app_server_start_failed, reason}}
+      end
+    end
+  end
+
+  defp finish_start_session(client, socket, workspace, worker_host, cc) do
+    case open_conversation(client, workspace, cc) do
+      {:ok, conversation_id, session_id} ->
+        Logger.info("Claude Code conversation opened conversation_id=#{conversation_id} socket=#{socket}")
+
+        {:ok,
+         %{
+           client: client,
+           conversation_id: conversation_id,
+           session_id: session_id,
+           tmux_socket: socket,
+           workspace: workspace,
+           worker_host: worker_host,
+           metadata: %{}
+         }}
+
+      {:error, reason} ->
+        AppServerClient.stop(client)
+        Logger.error("Failed to open Claude Code conversation: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp open_conversation(client, workspace, cc) do
+    startup = cc.startup_timeout_ms
+
+    with {:ok, _} <-
+           AppServerClient.request(
+             client,
+             "initialize",
+             %{"clientInfo" => %{"name" => "symphony-cc", "version" => "1.0"}},
+             startup
+           ),
+         {:ok, result} <-
+           AppServerClient.request(
+             client,
+             "newConversation",
+             new_conversation_params(workspace, cc),
+             startup
+           ) do
+      conversation_id = result["conversationId"]
+      session_id = result["sessionId"] || conversation_id
+
+      if is_binary(conversation_id) do
+        {:ok, conversation_id, session_id}
+      else
+        {:error, {:invalid_new_conversation_result, result}}
+      end
+    else
+      {:error, reason} -> {:error, {:new_conversation_failed, normalize_error(reason)}}
+    end
+  end
+
+  defp new_conversation_params(workspace, cc) do
+    base = %{"cwd" => workspace, "permissionMode" => cc.permission_mode}
+
+    if is_binary(cc.model) and cc.model != "" do
+      Map.put(base, "model", cc.model)
+    else
+      base
     end
   end
 
   @spec run_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run_turn(
-        %{
-          session_id_agent: agent_pid,
-          workspace: workspace,
-          metadata: metadata
-        } = _session,
+        %{client: client, conversation_id: conversation_id, session_id: session_id} = _session,
         prompt,
         issue,
         opts \\ []
       ) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
-    session_id = Agent.get(agent_pid, & &1)
+    turn_timeout = turn_timeout_ms()
+    metadata = base_turn_metadata(client)
 
-    prompt_path = write_temp_prompt(prompt)
+    # Drop any notifications left over from startup or a previous turn so a stale
+    # `conversation/state` / `turnComplete` can't end this turn early.
+    drain_notifications()
 
-    try do
-      command = build_command(session_id, prompt_path)
+    emit_message(
+      on_message,
+      :session_started,
+      %{session_id: session_id, thread_id: session_id, turn_id: "turn-1"},
+      metadata
+    )
 
-      case start_port(command, workspace) do
-        {:ok, port} ->
-          port_pid = port_os_pid(port)
-          turn_metadata = Map.put(metadata, :codex_app_server_pid, port_pid)
+    params = %{
+      "conversationId" => conversation_id,
+      "text" => prompt,
+      "waitForCompletion" => false,
+      "timeoutMs" => turn_timeout
+    }
 
-          emit_message(on_message, :session_started, %{
-            session_id: session_id || "pending",
-            thread_id: session_id || "pending",
-            turn_id: "turn-1"
-          }, turn_metadata)
+    case AppServerClient.request(client, "sendUserMessage", params, @ack_timeout_ms) do
+      {:ok, _ack} ->
+        deadline = System.monotonic_time(:millisecond) + turn_timeout + @turn_grace_ms
+        await_turn(client, conversation_id, session_id, on_message, metadata, deadline)
 
-          try do
-            stream_result = stream_turn(port, on_message, agent_pid, turn_metadata)
+      {:error, reason} ->
+        mapped = map_send_error(reason)
 
-            case stream_result do
-              {:ok, _result} ->
-                final_session_id = Agent.get(agent_pid, & &1) || session_id || "unknown"
+        Logger.warning("Claude Code sendUserMessage failed for #{issue_context(issue)}: #{inspect(mapped)}")
 
-                Logger.info("Claude Code session completed for #{issue_context(issue)} session_id=#{final_session_id}")
+        emit_message(
+          on_message,
+          :turn_ended_with_error,
+          %{session_id: session_id, reason: mapped},
+          metadata
+        )
 
-                {:ok,
-                 %{
-                   result: :turn_completed,
-                   session_id: final_session_id,
-                   thread_id: final_session_id,
-                   turn_id: "turn-1"
-                 }}
+        {:error, mapped}
+    end
+  end
 
-              {:error, reason} ->
-                Logger.warning("Claude Code session ended with error for #{issue_context(issue)}: #{inspect(reason)}")
+  defp await_turn(client, conversation_id, session_id, on_message, metadata, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
 
-                emit_message(on_message, :turn_ended_with_error, %{
-                  session_id: session_id,
-                  reason: reason
-                }, turn_metadata)
+    if remaining <= 0 do
+      handle_turn_timeout(client, conversation_id, session_id, on_message, metadata)
+    else
+      receive do
+        {:cc_appserver_notification, "conversation/turnComplete", %{"conversationId" => ^conversation_id} = params} ->
+          handle_turn_complete(params, session_id, on_message, metadata)
 
-                {:error, reason}
-            end
-          after
-            close_port(port, port_pid)
-          end
+        {:cc_appserver_notification, "conversation/item", %{"conversationId" => ^conversation_id, "item" => item}} ->
+          emit_message(on_message, :notification, %{payload: item, raw: encode_raw(item)}, metadata)
+          await_turn(client, conversation_id, session_id, on_message, metadata, deadline)
 
-        {:error, reason} ->
-          Logger.error("Failed to start Claude Code for #{issue_context(issue)}: #{inspect(reason)}")
-          emit_message(on_message, :startup_failed, %{reason: reason}, metadata)
-          {:error, reason}
+        {:cc_appserver_notification, "conversation/state", %{"conversationId" => ^conversation_id, "state" => "dead"}} ->
+          Logger.warning("Claude Code session died mid-turn session_id=#{session_id}")
+
+          emit_message(
+            on_message,
+            :turn_ended_with_error,
+            %{session_id: session_id, reason: :conversation_dead},
+            metadata
+          )
+
+          {:error, :conversation_dead}
+
+        {:cc_appserver_notification, "conversation/state", %{"conversationId" => ^conversation_id} = params} ->
+          emit_message(on_message, :other_message, %{payload: params, raw: encode_raw(params)}, metadata)
+          await_turn(client, conversation_id, session_id, on_message, metadata, deadline)
+
+        {:cc_appserver_notification, _method, _params} ->
+          # Notification for another conversation (shouldn't happen — one
+          # conversation per client) or a kind we don't translate.
+          await_turn(client, conversation_id, session_id, on_message, metadata, deadline)
+
+        {:cc_appserver_down, reason} ->
+          Logger.warning("cc-appserver child went down mid-turn: #{inspect(reason)}")
+
+          emit_message(
+            on_message,
+            :turn_ended_with_error,
+            %{session_id: session_id, reason: {:appserver_down, reason}},
+            metadata
+          )
+
+          {:error, {:appserver_down, reason}}
+      after
+        remaining ->
+          handle_turn_timeout(client, conversation_id, session_id, on_message, metadata)
       end
-    after
-      cleanup_temp_prompt(prompt_path)
+    end
+  end
+
+  defp handle_turn_complete(params, session_id, on_message, metadata) do
+    # Cumulative session usage is what the orchestrator's delta tracker expects
+    # (it treats token counts as monotonically increasing absolute totals).
+    usage = params["sessionUsage"] || params["usage"] || %{}
+    turn_metadata = Map.put(metadata, :usage, usage)
+
+    if params["timedOut"] == true do
+      Logger.warning("Claude Code turn timed out session_id=#{session_id}")
+
+      emit_message(
+        on_message,
+        :turn_ended_with_error,
+        %{session_id: session_id, reason: :turn_timeout},
+        turn_metadata
+      )
+
+      {:error, :turn_timeout}
+    else
+      emit_message(
+        on_message,
+        :turn_completed,
+        %{payload: params, raw: encode_raw(params), details: params},
+        turn_metadata
+      )
+
+      Logger.info("Claude Code turn completed session_id=#{session_id}")
+
+      {:ok,
+       %{
+         result: :turn_completed,
+         session_id: session_id,
+         thread_id: session_id,
+         turn_id: "turn-1"
+       }}
+    end
+  end
+
+  defp handle_turn_timeout(client, conversation_id, session_id, on_message, metadata) do
+    Logger.warning("Claude Code turn produced no completion in time session_id=#{session_id}")
+
+    AppServerClient.request(
+      client,
+      "interruptConversation",
+      %{"conversationId" => conversation_id},
+      @interrupt_timeout_ms
+    )
+
+    emit_message(
+      on_message,
+      :turn_ended_with_error,
+      %{session_id: session_id, reason: :turn_timeout},
+      metadata
+    )
+
+    {:error, :turn_timeout}
+  end
+
+  @doc """
+  Crash recovery for a session whose Claude process died while the cc-appserver
+  child is still alive: re-adopts the conversation via interactive `--resume`
+  (the tmux/transcript survive). Returns the same session on success.
+  """
+  @spec resume_session(session()) :: {:ok, session()} | {:error, term()}
+  def resume_session(%{client: client, conversation_id: conversation_id} = session)
+      when is_pid(client) do
+    case AppServerClient.request(
+           client,
+           "resumeConversation",
+           %{"conversationId" => conversation_id},
+           startup_timeout_ms()
+         ) do
+      {:ok, _result} -> {:ok, session}
+      {:error, reason} -> {:error, {:resume_failed, normalize_error(reason)}}
     end
   end
 
   @spec stop_session(session()) :: :ok
-  def stop_session(%{session_id_agent: agent_pid}) when is_pid(agent_pid) do
-    Agent.stop(agent_pid)
+  def stop_session(%{client: client, conversation_id: conversation_id}) when is_pid(client) do
+    if Process.alive?(client) do
+      # Best-effort: close the conversation (kills its tmux session) then stop
+      # the child, whose terminate also kills this agent's tmux server.
+      AppServerClient.request(
+        client,
+        "closeConversation",
+        %{"conversationId" => conversation_id, "forget" => true},
+        @close_timeout_ms
+      )
+
+      AppServerClient.stop(client)
+    end
+
     :ok
   end
 
   def stop_session(_session), do: :ok
 
-  # --- Port management ---
+  # --- helpers ---
 
-  defp build_command(session_id, prompt_path) do
-    cc_command = Config.settings!().claude_code.command
-    base = "#{cc_command} -p --output-format stream-json --verbose --dangerously-skip-permissions"
-
-    resume_flag =
-      case session_id do
-        id when is_binary(id) and id != "" -> " --resume #{shell_escape(id)}"
-        _ -> ""
-      end
-
-    "exec #{base}#{resume_flag} < #{shell_escape(prompt_path)}"
-  end
-
-  defp start_port(command, workspace) do
-    executable = System.find_executable("bash")
-
-    if is_nil(executable) do
-      {:error, :bash_not_found}
-    else
-      env_vars =
-        case OAuthTokenManager.current_token() do
-          nil ->
-            Logger.warning("No OAuth token available for agent — Linear API calls will fail")
-            []
-
-          token ->
-            [{~c"LINEAR_API_KEY", String.to_charlist("Bearer #{token}")}]
-        end
-
-      port =
-        Port.open(
-          {:spawn_executable, String.to_charlist(executable)},
-          [
-            :binary,
-            :exit_status,
-            :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(command)],
-            cd: String.to_charlist(workspace),
-            env: env_vars,
-            line: @port_line_bytes
-          ]
-        )
-
-      {:ok, port}
+  defp base_turn_metadata(client) do
+    case AppServerClient.os_pid(client) do
+      nil -> %{}
+      pid -> %{codex_app_server_pid: pid}
     end
   end
 
-  defp port_os_pid(port) do
-    case :erlang.port_info(port, :os_pid) do
-      {:os_pid, os_pid} -> to_string(os_pid)
-      _ -> nil
-    end
-  end
-
-  defp close_port(port, os_pid) do
-    try do
-      Port.close(port)
-    catch
-      :error, :badarg -> :ok
-    end
-
-    kill_os_process(os_pid)
-  end
-
-  defp kill_os_process(nil), do: :ok
-
-  defp kill_os_process(os_pid) when is_binary(os_pid) do
-    # bash -lc forks claude as a child, so kill children first, then bash
-    System.cmd("pkill", ["-P", os_pid], stderr_to_stdout: true)
-    System.cmd("kill", [os_pid], stderr_to_stdout: true)
-    :ok
-  rescue
-    _ -> :ok
-  end
-
-  # --- JSONL stream processing ---
-
-  defp stream_turn(port, on_message, agent_pid, metadata) do
-    timeout_ms = Config.settings!().claude_code.turn_timeout_ms
-
-    receive_loop(port, on_message, agent_pid, metadata, timeout_ms, "")
-  end
-
-  defp receive_loop(port, on_message, agent_pid, metadata, timeout_ms, pending_line) do
+  defp drain_notifications do
     receive do
-      {^port, {:data, {:eol, chunk}}} ->
-        complete_line = pending_line <> to_string(chunk)
-        handle_line(port, on_message, agent_pid, metadata, timeout_ms, complete_line)
-
-      {^port, {:data, {:noeol, chunk}}} ->
-        receive_loop(port, on_message, agent_pid, metadata, timeout_ms, pending_line <> to_string(chunk))
-
-      {^port, {:exit_status, 0}} ->
-        {:ok, :turn_completed}
-
-      {^port, {:exit_status, status}} ->
-        {:error, {:port_exit, status}}
+      {:cc_appserver_notification, _method, _params} -> drain_notifications()
     after
-      timeout_ms ->
-        {:error, :turn_timeout}
+      0 -> :ok
     end
   end
 
-  defp handle_line(port, on_message, agent_pid, metadata, timeout_ms, line) do
-    case Jason.decode(line) do
-      {:ok, %{"type" => "system", "subtype" => "init"} = payload} ->
-        handle_init_event(payload, on_message, agent_pid, metadata)
-        receive_loop(port, on_message, agent_pid, metadata, timeout_ms, "")
+  defp resolve_app_server_path(path) when is_binary(path) and path != "" do
+    expanded = Path.expand(path)
 
-      {:ok, %{"type" => type} = payload} ->
-        handle_typed_event(type, payload, line, on_message, agent_pid, metadata)
-        receive_loop(port, on_message, agent_pid, metadata, timeout_ms, "")
-
-      {:ok, payload} ->
-        emit_message(on_message, :other_message, %{
-          payload: payload,
-          raw: line
-        }, metadata)
-
-        receive_loop(port, on_message, agent_pid, metadata, timeout_ms, "")
-
-      {:error, _reason} ->
-        log_non_json_line(line)
-        receive_loop(port, on_message, agent_pid, metadata, timeout_ms, "")
+    if File.regular?(expanded) do
+      {:ok, expanded}
+    else
+      {:error, {:app_server_not_found, expanded}}
     end
   end
 
-  defp handle_typed_event("assistant", payload, line, on_message, _agent_pid, metadata) do
-    usage_metadata = maybe_extract_usage(payload, metadata)
-    emit_message(on_message, :notification, %{payload: payload, raw: line}, usage_metadata)
-  end
+  defp resolve_app_server_path(_path), do: {:error, :app_server_path_not_configured}
 
-  defp handle_typed_event("tool_use", payload, line, on_message, _agent_pid, metadata) do
-    emit_message(on_message, :notification, %{payload: payload, raw: line}, metadata)
-  end
-
-  defp handle_typed_event("tool_result", payload, line, on_message, _agent_pid, metadata) do
-    emit_message(on_message, :notification, %{payload: payload, raw: line}, metadata)
-  end
-
-  defp handle_typed_event("result", payload, line, on_message, agent_pid, metadata) do
-    handle_result_event(payload, line, on_message, agent_pid, metadata)
-  end
-
-  defp handle_typed_event(_type, payload, line, on_message, _agent_pid, metadata) do
-    emit_message(on_message, :other_message, %{payload: payload, raw: line}, metadata)
-  end
-
-  defp handle_init_event(payload, on_message, agent_pid, metadata) do
-    case Map.get(payload, "session_id") do
-      session_id when is_binary(session_id) ->
-        Agent.update(agent_pid, fn _ -> session_id end)
-
-        emit_message(on_message, :session_started, %{
-          session_id: session_id,
-          thread_id: session_id,
-          turn_id: "turn-1"
-        }, metadata)
-
-      _ ->
-        :ok
+  defp resolve_python(bin) when is_binary(bin) and bin != "" do
+    case System.find_executable(bin) do
+      nil -> {:error, {:python_not_found, bin}}
+      path -> {:ok, path}
     end
   end
 
-  defp handle_result_event(payload, raw, on_message, agent_pid, metadata) do
-    case Map.get(payload, "session_id") do
-      session_id when is_binary(session_id) ->
-        Agent.update(agent_pid, fn _ -> session_id end)
-      _ ->
-        :ok
+  defp resolve_python(_bin), do: {:error, :python_not_configured}
+
+  defp build_tmux_socket(prefix) do
+    prefix = if is_binary(prefix) and prefix != "", do: prefix, else: "symphony"
+    "#{prefix}_#{random_hex(8)}"
+  end
+
+  defp agent_env do
+    case OAuthTokenManager.current_token() do
+      nil ->
+        Logger.warning("No OAuth token available for agent — Linear API calls will fail")
+        []
+
+      token ->
+        [{~c"LINEAR_API_KEY", String.to_charlist("Bearer #{token}")}]
     end
-
-    usage = Map.get(payload, "usage", %{})
-    usage_metadata = Map.put(metadata, :usage, usage)
-
-    emit_message(on_message, :turn_completed, %{
-      payload: payload,
-      raw: raw,
-      details: payload
-    }, usage_metadata)
   end
 
-  defp maybe_extract_usage(%{"message" => %{"usage" => usage}}, metadata) when is_map(usage) do
-    Map.put(metadata, :usage, usage)
+  defp turn_timeout_ms, do: Config.settings!().claude_code.turn_timeout_ms
+  defp startup_timeout_ms, do: Config.settings!().claude_code.startup_timeout_ms
+
+  defp map_send_error(%{"code" => -32_002}), do: :conversation_busy
+  defp map_send_error(%{"code" => -32_003}), do: :conversation_dead
+  defp map_send_error(%{"code" => -32_001}), do: :conversation_not_found
+  defp map_send_error(:appserver_down), do: :appserver_down
+  defp map_send_error(:timeout), do: :send_timeout
+  defp map_send_error(other), do: normalize_error(other)
+
+  defp normalize_error(%{"code" => code, "message" => message}), do: {:rpc_error, code, message}
+  defp normalize_error(other), do: other
+
+  defp encode_raw(map) do
+    case Jason.encode(map) do
+      {:ok, json} -> json
+      _ -> inspect(map)
+    end
   end
-
-  defp maybe_extract_usage(_payload, metadata), do: metadata
-
-  # --- Helpers ---
 
   defp validate_workspace(workspace, nil) when is_binary(workspace) do
     expanded = Path.expand(workspace)
@@ -359,16 +461,6 @@ defmodule SymphonyElixir.ClaudeCode.Adapter do
     end
   end
 
-  defp write_temp_prompt(prompt) do
-    path = Path.join(System.tmp_dir!(), "symphony_cc_prompt_#{random_hex(8)}")
-    File.write!(path, prompt)
-    path
-  end
-
-  defp cleanup_temp_prompt(path) do
-    File.rm(path)
-  end
-
   defp random_hex(bytes) do
     :crypto.strong_rand_bytes(bytes) |> Base.encode16(case: :lower)
   end
@@ -383,31 +475,11 @@ defmodule SymphonyElixir.ClaudeCode.Adapter do
     on_message.(message)
   end
 
-  defp log_non_json_line(line) do
-    text =
-      line
-      |> to_string()
-      |> String.trim()
-      |> String.slice(0, @max_stream_log_bytes)
-
-    if text != "" do
-      if String.match?(text, ~r/\b(error|warn|warning|failed|fatal|panic|exception)\b/i) do
-        Logger.warning("Claude Code output: #{text}")
-      else
-        Logger.debug("Claude Code output: #{text}")
-      end
-    end
-  end
-
   defp issue_context(%{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
   end
 
   defp issue_context(_issue), do: "unknown"
-
-  defp shell_escape(value) when is_binary(value) do
-    "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
-  end
 
   defp default_on_message(_message), do: :ok
 end
