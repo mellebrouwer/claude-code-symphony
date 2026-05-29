@@ -75,29 +75,33 @@ defmodule SymphonyElixir.ClaudeCode.Adapter do
             turn_id: "turn-1"
           }, turn_metadata)
 
-          case stream_turn(port, on_message, agent_pid, turn_metadata) do
-            {:ok, _result} ->
-              final_session_id = Agent.get(agent_pid, & &1) || session_id || "unknown"
+          try do
+            case stream_turn(port, on_message, agent_pid, turn_metadata) do
+              {:ok, _result} ->
+                final_session_id = Agent.get(agent_pid, & &1) || session_id || "unknown"
 
-              Logger.info("Claude Code session completed for #{issue_context(issue)} session_id=#{final_session_id}")
+                Logger.info("Claude Code session completed for #{issue_context(issue)} session_id=#{final_session_id}")
 
-              {:ok,
-               %{
-                 result: :turn_completed,
-                 session_id: final_session_id,
-                 thread_id: final_session_id,
-                 turn_id: "turn-1"
-               }}
+                {:ok,
+                 %{
+                   result: :turn_completed,
+                   session_id: final_session_id,
+                   thread_id: final_session_id,
+                   turn_id: "turn-1"
+                 }}
 
-            {:error, reason} ->
-              Logger.warning("Claude Code session ended with error for #{issue_context(issue)}: #{inspect(reason)}")
+              {:error, reason} ->
+                Logger.warning("Claude Code session ended with error for #{issue_context(issue)}: #{inspect(reason)}")
 
-              emit_message(on_message, :turn_ended_with_error, %{
-                session_id: session_id,
-                reason: reason
-              }, turn_metadata)
+                emit_message(on_message, :turn_ended_with_error, %{
+                  session_id: session_id,
+                  reason: reason
+                }, turn_metadata)
 
-              {:error, reason}
+                {:error, reason}
+            end
+          after
+            close_port(port, port_pid)
           end
 
         {:error, reason} ->
@@ -130,7 +134,7 @@ defmodule SymphonyElixir.ClaudeCode.Adapter do
         _ -> ""
       end
 
-    "#{base}#{resume_flag} < #{shell_escape(prompt_path)}"
+    "exec #{base}#{resume_flag} < #{shell_escape(prompt_path)}"
   end
 
   defp start_port(command, workspace) do
@@ -171,6 +175,27 @@ defmodule SymphonyElixir.ClaudeCode.Adapter do
       {:os_pid, os_pid} -> to_string(os_pid)
       _ -> nil
     end
+  end
+
+  defp close_port(port, os_pid) do
+    try do
+      Port.close(port)
+    catch
+      :error, :badarg -> :ok
+    end
+
+    kill_os_process(os_pid)
+  end
+
+  defp kill_os_process(nil), do: :ok
+
+  defp kill_os_process(os_pid) when is_binary(os_pid) do
+    # bash -lc forks claude as a child, so kill children first, then bash
+    System.cmd("pkill", ["-P", os_pid], stderr_to_stdout: true)
+    System.cmd("kill", [os_pid], stderr_to_stdout: true)
+    :ok
+  rescue
+    _ -> :ok
   end
 
   # --- JSONL stream processing ---
