@@ -23,7 +23,7 @@ agent:
 workspace:
   root: /tmp/symphony_workspaces
 hooks:
-  after_create: "git clone /Users/mellbrouwer/Documents/Coding/symphony-cc . 2>/dev/null || true"
+  after_create: "git clone https://github.com/mellebrouwer/symphony-cc.git . 2>/dev/null || true"
 polling:
   interval_ms: 30000
 ---
