@@ -1,0 +1,23 @@
+# Secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+
+# Claude Code
+.claude/
+
+# Elixir build artifacts
+elixir/_build/
+elixir/deps/
+elixir/log/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*~
