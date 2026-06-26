@@ -24,7 +24,7 @@ agent:
 workspace:
   root: /tmp/symphony_workspaces
 hooks:
-  after_create: "git clone /Users/mellbrouwer/Documents/Coding/symphony-cc . 2>/dev/null || true && git remote set-url origin https://github.com/mellebrouwer/symphony-cc.git"
+  after_create: "git clone /Users/mellbrouwer/Documents/Coding/claude-code-symphony . 2>/dev/null || true && git remote set-url origin https://github.com/mellebrouwer/claude-code-symphony.git"
 polling:
   interval_ms: 10000
 ---

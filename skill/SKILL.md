@@ -11,7 +11,7 @@ Manage Symphony CC instances across projects. Each project gets its own Linear p
 
 ## Shared infrastructure
 
-- **Binary:** `~/.local/bin/symphony` (escript — rebuild from `~/Documents/Coding/symphony-cc/elixir`)
+- **Binary:** `~/.local/bin/symphony` (escript — rebuild from `~/Documents/Coding/claude-code-symphony/elixir`)
 - **OAuth credentials:** `~/.symphony/.linear_oauth.json` (shared across all instances)
 - **Linear team ID:** `89e76573-6ebc-4fcd-90c9-0d4d2693bddd`
 - **Launchd plists:** `~/Library/LaunchAgents/com.symphony-cc.<project>.plist`
@@ -103,7 +103,7 @@ Full setup for a new project. Requires the project's repo path (local) and GitHu
 ### `symphony rebuild`
 
 ```bash
-cd ~/Documents/Coding/symphony-cc/elixir && mix build && cp bin/symphony ~/.local/bin/symphony
+cd ~/Documents/Coding/claude-code-symphony/elixir && mix build && cp bin/symphony ~/.local/bin/symphony
 ```
 
 Then restart any running instances (stop + start each).

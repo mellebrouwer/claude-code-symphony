@@ -8,7 +8,7 @@
   <array>
     <string>/usr/bin/env</string>
     <string>python3</string>
-    <string>/Users/mellbrouwer/Documents/Coding/symphony-cc/skill/scripts/watchdog.py</string>
+    <string>/Users/mellbrouwer/Documents/Coding/claude-code-symphony/skill/scripts/watchdog.py</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
