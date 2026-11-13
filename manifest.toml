@@ -1,0 +1,5 @@
+summary = "Automated coding agents: picks up Linear tickets, does the work with Claude Code and posts results for Mell's review (fork of OpenAI Symphony)"
+kind = "service"
+runs_on = "mac-studio"
+deploy = "run ./setup.sh, or symphony rebuild (see skill/SKILL.md)"
+docs = ["README.md", "CLAUDE.md", "SPEC.md", "WORKFLOW.md", "TODO.md", "skill/SKILL.md"]
